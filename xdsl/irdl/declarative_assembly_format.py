@@ -37,6 +37,20 @@ from xdsl.utils.mlir_lexer import PunctuationSpelling
 
 
 @dataclass
+class AttributeParsingState:
+    """
+    State carried during the parsing of an attribute using the declarative assembly
+    format. Similar to ParsingState but designed for attributes with parameters.
+    """
+    
+    parameters: dict[str, Attribute]
+    """Parameters that have been parsed."""
+    
+    def __init__(self, attr_def: 'ParamAttrDef'):
+        self.parameters = {}
+
+
+@dataclass
 class ParsingState:
     """
     State carried during the parsing of an operation using the declarative assembly
@@ -156,6 +170,54 @@ class FormatProgram:
             regions=state.regions,
             successors=state.successors,
         )
+
+    def parse_attribute(
+        self, parser: Parser, attr_class: type['ParametrizedAttribute']
+    ) -> 'ParametrizedAttribute':
+        """
+        Parse an attribute with this format.
+        This is the attribute equivalent of the parse method for operations.
+        """
+        # Get the attribute definition
+        attr_def = attr_class.get_irdl_definition()
+        
+        # Create attribute parsing state
+        state = AttributeParsingState(attr_def)
+        
+        # Parse elements one by one
+        for stmt in self.stmts:
+            stmt.parse_attribute(parser, state, attr_def)
+        
+        # Extract parameters in the correct order
+        parameters = []
+        for param_name, _ in attr_def.parameters:
+            if param_name not in state.parameters:
+                parser.raise_error(f"Parameter '{param_name}' was not parsed")
+            parameters.append(state.parameters[param_name])
+        
+        return attr_class.new(parameters)
+
+    def print_attribute(
+        self, printer: Printer, attr: 'ParametrizedAttribute'
+    ) -> None:
+        """
+        Print an attribute using this format.
+        This is the attribute equivalent of the print method for operations.
+        """
+        from xdsl.irdl.declarative_assembly_format import AttributePrintingState
+        
+        # Create printing state  
+        state = AttributePrintingState()
+        
+        # Get attribute definition
+        attr_def = attr.get_irdl_definition()
+        
+        # Print elements one by one
+        for stmt in self.stmts:
+            stmt.print_attribute(printer, state, attr, attr_def)
+
+
+
 
     def resolve_constraint_variables(self, state: ParsingState, op_def: OpDef):
         """
@@ -297,6 +359,15 @@ class FormatDirective(Directive, ABC):
         Parses the directive, returning True if input was consumed.
         """
         ...
+
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+        parser.parse_punctuation(self.punctuation)
+
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
+        printer.print_string(self.punctuation)
+        state.last_was_punctuation = True
+        state.should_emit_space = False
 
     @abstractmethod
     def print(
@@ -488,6 +559,15 @@ class AttrDictDirective(FormatDirective):
         if printed:
             state.last_was_punctuation = False
             state.should_emit_space = True
+
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+        # Parse attribute dictionary (typically empty for attribute parameters)
+        attrs = parser.parse_optional_attr_dict()
+        # For attributes, we don't usually store the attr-dict content
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
+        # For attributes, attr-dict is typically empty, so we don't print anything
+        pass
 
     def is_optional_like(self) -> bool:
         return True
@@ -1143,6 +1223,50 @@ class AttributeVariable(FormatDirective):
             return attr.print_parameter(printer)
         raise ValueError("Attributes must be Data or ParameterizedAttribute!")
 
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+        param_name = self.name
+        
+        # Find the parameter constraint
+        param_constraint = None
+        for name, constraint in attr_def.parameters:
+            if name == param_name:
+                param_constraint = constraint
+                break
+        
+        if param_constraint is None:
+            parser.raise_error(f"Unknown parameter '{param_name}'")
+        
+        if param_name in state.parameters:
+            parser.raise_error(f"Parameter '{param_name}' already parsed")
+        
+        # Parse the parameter value
+        value = parser.parse_attribute()
+        state.parameters[param_name] = value
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
+        param_name = self.name
+        
+        # Find parameter index
+        param_index = None
+        for i, (name, _) in enumerate(attr_def.parameters):
+            if name == param_name:
+                param_index = i
+                break
+        
+        if param_index is None:
+            raise ValueError(f"Unknown parameter '{param_name}'")
+        
+        if state.should_emit_space and not state.last_was_punctuation:
+            printer.print_string(" ")
+        
+        # Print the parameter value
+        param_value = attr.parameters[param_index]
+        printer.print_attribute(param_value)
+        
+        state.last_was_punctuation = False
+        state.should_emit_space = True
+
+
 
 @dataclass(frozen=True)
 class DefaultValuedAttributeVariable(AttributeVariable):
@@ -1307,6 +1431,16 @@ class KeywordDirective(FormatDirective):
     def is_optional_like(self) -> bool:
         return True
 
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+        parser.parse_keyword(self.keyword)
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
+        if state.should_emit_space and not state.last_was_punctuation:
+            printer.print_string(" ")
+        printer.print_string(self.keyword)
+        state.last_was_punctuation = False
+        state.should_emit_space = True
+
 
 @dataclass(frozen=True)
 class OptionalGroupDirective(FormatDirective):
@@ -1340,3 +1474,26 @@ class OptionalGroupDirective(FormatDirective):
         self.then_first.set_empty(state)
         for element in self.then_elements:
             element.set_empty(state)
+
+@dataclass(frozen=True)  
+class AttributeParameterVariable(FormatDirective):
+    """New directive for $parameter_name in attributes."""
+    
+    name: str
+    index: int
+    
+    def parse(self, parser: Parser, state: ParsingState) -> bool:
+        param_value = parser.parse_attribute()
+        state.attributes[self.name] = param_value
+        return True
+    
+    def print(self, printer: Printer, state: PrintingState, op) -> None:
+        # When used for attributes, 'op' is actually the attribute
+        attr = op
+        param_value = attr.parameters[self.index]
+        if state.should_emit_space and not state.last_was_punctuation:
+            printer.print(" ")
+        printer.print_attribute(param_value)
+        state.last_was_punctuation = False
+        state.should_emit_space = True
+

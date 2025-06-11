@@ -1278,13 +1278,31 @@ class AttrParser(BaseParser):
         """
         Parse an array attribute, if present, with format:
             array-attr ::= `[` (attribute (`,` attribute)*)? `]`
+                        |  `<` (attribute (`,` attribute)*)? `>`
         """
-        attrs = self.parse_optional_comma_separated_list(
-            self.Delimiter.SQUARE, self.parse_attribute
-        )
-        if attrs is None:
-            return None
-        return ArrayAttr(attrs)
+        # Try square brackets first (original xDSL syntax)
+        if self.parse_optional_punctuation("["):
+            if self.parse_optional_punctuation("]"):
+                return ArrayAttr([])
+            
+            attrs = self.parse_comma_separated_list(
+                self.Delimiter.NONE, self.parse_attribute
+            )
+            self.parse_punctuation("]")
+            return ArrayAttr(attrs)
+        
+        # Try angle brackets (MLIR-style syntax)
+        if self.parse_optional_punctuation("<"):
+            if self.parse_optional_punctuation(">"):
+                return ArrayAttr([])
+            
+            attrs = self.parse_comma_separated_list(
+                self.Delimiter.NONE, self.parse_attribute
+            )
+            self.parse_punctuation(">")
+            return ArrayAttr(attrs)
+        
+        return None
 
     def parse_function_type(self) -> FunctionType:
         """

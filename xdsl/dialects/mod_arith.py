@@ -1,69 +1,37 @@
 """
-mod_arith is a dialect implementing modular arithmetic, originally
-implemented as part of the HEIR project (https://github.com/google/heir/tree/main).
+mod_arith dialect implementation for xDSL
+Provides modular arithmetic types (no operations, just the type)
 """
 
-from abc import ABC
-from typing import ClassVar
-
-from xdsl.dialects.arith import signlessIntegerLike
-from xdsl.dialects.builtin import IntegerAttr
-from xdsl.ir import Attribute, Dialect, Operation, SSAValue
+from xdsl.dialects.builtin import IntegerAttr, IntegerType
+from xdsl.ir import Attribute, Dialect, ParametrizedAttribute, TypeAttribute
 from xdsl.irdl import (
-    IRDLOperation,
-    ParsePropInAttrDict,
-    VarConstraint,
-    irdl_op_definition,
-    operand_def,
-    prop_def,
-    result_def,
-    traits_def,
+    ParameterDef,
+    irdl_attr_definition,
 )
-from xdsl.traits import Pure
+from xdsl.parser import Parser
+from xdsl.printer import Printer
 
 
-class BinaryOp(IRDLOperation, ABC):
+@irdl_attr_definition
+class ModArithType(ParametrizedAttribute, TypeAttribute):
     """
-    Simple binary operation
+    A type representing integers modulo some value.
+    
+    Syntax: !mod_arith.int<modulus : type>
+    Example: !mod_arith.int<1032955396097 : i64>
     """
-
-    T: ClassVar = VarConstraint("T", signlessIntegerLike)
-
-    lhs = operand_def(T)
-    rhs = operand_def(T)
-    output = result_def(T)
-    modulus = prop_def(IntegerAttr)
-
-    irdl_options = [ParsePropInAttrDict()]
-
-    assembly_format = "$lhs `,` $rhs attr-dict `:` type($output)"
-    traits = traits_def(Pure())
-
-    def __init__(
-        self,
-        lhs: SSAValue | Operation,
-        rhs: SSAValue | Operation,
-        result_type: Attribute | None,
-        modulus: Attribute,
-    ):
-        if result_type is None:
-            result_type = SSAValue.get(lhs).type
-
-        super().__init__(
-            operands=[lhs, rhs],
-            result_types=[result_type],
-            properties={"modulus": modulus},
-        )
-
-
-@irdl_op_definition
-class AddOp(BinaryOp):
-    name = "mod_arith.add"
-
+    name = "mod_arith.int"
+    
+    modulus: ParameterDef[IntegerAttr]
+    
 
 ModArith = Dialect(
     "mod_arith",
     [
-        AddOp,
+        # No operations - only the type
+    ],
+    [
+        ModArithType,
     ],
 )

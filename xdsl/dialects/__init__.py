@@ -63,6 +63,11 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
 
         return Cf
 
+    def get_ckks():
+        from xdsl.dialects.ckks import CKKS
+
+        return CKKS
+
     def get_cmath():
         from xdsl.dialects.cmath import Cmath
 
@@ -158,6 +163,11 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
 
         return LTL
 
+    def get_lwe():
+        from xdsl.dialects.lwe import LWE
+
+        return LWE
+
     def get_math():
         from xdsl.dialects.math import Math
 
@@ -213,6 +223,11 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
 
         return Ptr
 
+    def get_polynomial():
+        from xdsl.dialects.polynomial import Polynomial
+
+        return Polynomial
+
     def get_riscv_debug():
         from xdsl.dialects.riscv_debug import RISCV_Debug
 
@@ -242,6 +257,11 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
         from xdsl.dialects.riscv_snitch import RISCV_Snitch
 
         return RISCV_Snitch
+
+    def get_rns():
+        from xdsl.dialects.rns import RNS
+
+        return RNS
 
     def get_scf():
         from xdsl.dialects.scf import Scf
@@ -352,6 +372,7 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
         "cf": get_cf,
         "cmath": get_cmath,
         "comb": get_comb,
+        "ckks": get_ckks,
         "csl": get_csl,
         "csl_stencil": get_csl_stencil,
         "csl_wrapper": get_csl_wrapper,
@@ -369,6 +390,7 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
         "irdl": get_irdl,
         "llvm": get_llvm,
         "ltl": get_ltl,
+        "lwe": get_lwe,
         "math": get_math,
         "memref": get_memref,
         "memref_stream": get_memref_stream,
@@ -380,12 +402,14 @@ def get_all_dialects() -> dict[str, Callable[[], Dialect]]:
         "pdl_interp": get_pdl_interp,
         "printf": get_printf,
         "ptr_xdsl": get_ptr_xdsl,
+        "polynomial": get_polynomial,
         "riscv": get_riscv,
         "riscv_debug": get_riscv_debug,
         "riscv_func": get_riscv_func,
         "riscv_scf": get_riscv_scf,
         "riscv_cf": get_riscv_cf,
         "riscv_snitch": get_riscv_snitch,
+        "rns": get_rns,
         "scf": get_scf,
         "seq": get_seq,
         "smt": get_smt,

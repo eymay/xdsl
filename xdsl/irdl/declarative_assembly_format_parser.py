@@ -37,6 +37,7 @@ from xdsl.irdl import (
 from xdsl.irdl.declarative_assembly_format import (
     AttrDictDirective,
     AttributeVariable,
+    AttributeParameterVariable,
     DefaultValuedAttributeVariable,
     Directive,
     FormatDirective,
@@ -133,14 +134,31 @@ class FormatParser(BaseParser):
 
     def __init__(self, input: str, op_def: OpDef):
         super().__init__(ParserState(FormatLexer(Input(input, "<input>"))))
-        self.op_def = op_def
-        self.seen_operands = [False] * len(op_def.operands)
-        self.seen_operand_types = [False] * len(op_def.operands)
-        self.seen_result_types = [False] * len(op_def.results)
-        self.seen_attributes = set[str]()
-        self.seen_properties = set[str]()
-        self.seen_regions = [False] * len(op_def.regions)
-        self.seen_successors = [False] * len(op_def.successors)
+        self.op_def = op_def 
+
+        if hasattr(op_def, 'operands'):
+            # Original operation initialization
+            self.seen_operands = [False] * len(op_def.operands)
+            self.seen_operand_types = [False] * len(op_def.operands)
+            self.seen_result_types = [False] * len(op_def.results)
+            self.seen_attributes = set[str]()
+            self.seen_properties = set[str]()
+            self.seen_regions = [False] * len(op_def.regions)
+            self.seen_successors = [False] * len(op_def.successors)
+        elif hasattr(op_def, 'parameters'):
+            # New attribute initialization - attributes don't have operands/results/etc
+            self.seen_operands = []
+            self.seen_operand_types = []
+            self.seen_result_types = []
+            self.seen_attributes = set[str]()
+            self.seen_properties = set[str]()
+            self.seen_regions = []
+            self.seen_successors = []
+            # Track which parameters we've seen
+            self.seen_parameters = set[str]()
+        else:
+            raise ValueError(f"Unknown definition type: {type(op_def)}")
+
 
     def parse_format(self) -> FormatProgram:
         """
@@ -209,21 +227,28 @@ class FormatParser(BaseParser):
         Find out which constraint variables can be inferred from the parsed attributes.
         """
         vars = set[str]()
-        for i, (_, operand_def) in enumerate(self.op_def.operands):
-            vars |= operand_def.constr.variables_from_length()
-            if self.seen_operand_types[i]:
-                vars |= operand_def.constr.variables()
-        for i, (_, result_def) in enumerate(self.op_def.results):
-            if self.seen_result_types[i]:
-                vars |= result_def.constr.variables()
-        for prop_def in self.op_def.properties.values():
-            if isinstance(prop_def, OptionalDef) and prop_def.default_value is None:
-                continue
-            vars |= prop_def.constr.variables()
-        for attr_def in self.op_def.attributes.values():
-            if isinstance(attr_def, OptionalDef) and attr_def.default_value is None:
-                continue
-            vars |= attr_def.constr.variables()
+
+        print(self.op_def)
+        if hasattr(self.op_def, 'operands'):
+            vars = set[str]()
+            for i, (_, operand_def) in enumerate(self.op_def.operands):
+                vars |= operand_def.constr.variables_from_length()
+                if self.seen_operand_types[i]:
+                    vars |= operand_def.constr.variables()
+            for i, (_, result_def) in enumerate(self.op_def.results):
+                if self.seen_result_types[i]:
+                    vars |= result_def.constr.variables()
+            for prop_def in self.op_def.properties.values():
+                if isinstance(prop_def, OptionalDef) and prop_def.default_value is None:
+                    continue
+                vars |= prop_def.constr.variables()
+            for attr_def in self.op_def.attributes.values():
+                if isinstance(attr_def, OptionalDef) and attr_def.default_value is None:
+                    continue
+                vars |= attr_def.constr.variables()
+        elif hasattr(self.op_def, 'parameters'):  # ParamAttrDef
+            for param_name, param_constraint in self.op_def.parameters:
+                vars |= param_constraint.variables()
 
         return vars
 
@@ -232,6 +257,10 @@ class FormatParser(BaseParser):
         Check that all operands and operand types are refered at least once, or inferred
         from another construct.
         """
+
+        if not hasattr(self.op_def, 'operands'):
+            return
+
         for (
             seen_operand,
             seen_operand_type,
@@ -261,7 +290,8 @@ class FormatParser(BaseParser):
     def verify_results(self, var_constraint_names: AbstractSet[str]):
         """Check that all result types are refered at least once, or inferred
         from another construct."""
-
+        if not hasattr(self.op_def, 'results'):
+            return
         for result_type, (result_name, result_def) in zip(
             self.seen_result_types, self.op_def.results, strict=True
         ):
@@ -294,7 +324,16 @@ class FormatParser(BaseParser):
         Check that all properties are present, unless `ParsePropInAttrDict` option is
         used.
         """
-
+        if not hasattr(self.op_def, 'properties'):
+            # For attributes, just set up a basic attr_dict
+            attr_dict = elements[attr_dict_idx]
+            assert isinstance(attr_dict, AttrDictDirective)
+            elements[attr_dict_idx] = AttrDictDirective(
+                with_keyword=attr_dict.with_keyword,
+                reserved_attr_names=self.seen_attributes,
+                expected_properties=set(),
+            )
+            return
         missing_properties = set(self.op_def.properties.keys()) - self.seen_properties
 
         for option in self.op_def.options:
@@ -325,6 +364,9 @@ class FormatParser(BaseParser):
         """
         Check that all regions are present.
         """
+
+        if not hasattr(self.op_def, 'regions'):
+            return
         for (
             seen_region,
             (region_name, _),
@@ -344,6 +386,8 @@ class FormatParser(BaseParser):
         """
         Check that all successors are present.
         """
+        if not hasattr(self.op_def, 'successors'):
+            return
         for (
             seen_successor,
             (successor_name, _),
@@ -362,6 +406,8 @@ class FormatParser(BaseParser):
     def _parse_optional_operand(
         self, variable_name: str, top_level: bool
     ) -> OptionalOperandVariable | VariadicOperandVariable | OperandVariable | None:
+        if not hasattr(self.op_def, 'operands'):
+            return None
         for idx, (operand_name, operand_def) in enumerate(self.op_def.operands):
             if variable_name != operand_name:
                 continue
@@ -421,6 +467,7 @@ class FormatParser(BaseParser):
             end_position=end_pos,
         )
 
+
     def parse_optional_variable(
         self,
         *,
@@ -438,116 +485,139 @@ class FormatParser(BaseParser):
         end_pos = self._current_token.span.end
         variable_name = self.parse_identifier(" after '$'")
 
+        # Handle attributes (ParamAttrDef) - check parameters
+        if hasattr(self.op_def, 'parameters'):
+            for param_name, param_constraint in self.op_def.parameters:
+                if variable_name == param_name:
+                    if param_name in self.seen_attributes:
+                        self.raise_error(f"Parameter '{param_name}' used multiple times")
+                    self.seen_attributes.add(param_name)
+                    return AttributeVariable(param_name, False, None, None)
+            
+            # If we get here, the parameter wasn't found
+            self.raise_error(
+                f"expected variable to refer to a parameter, got '{variable_name}'",
+                at_position=start_pos,
+                end_position=end_pos,
+            )
+
+        # Handle operations (OpDef) - original logic
+        
         # Check if the variable is an operand
         if (variable := self._parse_optional_operand(variable_name, True)) is not None:
             return variable
 
-        # Check if the variable is a region
-        for idx, (region_name, region_def) in enumerate(self.op_def.regions):
-            if variable_name != region_name:
-                continue
-            self.seen_regions[idx] = True
-            match region_def:
-                case OptRegionDef() | OptSingleBlockRegionDef():
-                    return OptionalRegionVariable(variable_name, idx)
-                case VarRegionDef() | VarSingleBlockRegionDef():
-                    return VariadicRegionVariable(variable_name, idx)
-                case _:
-                    return RegionVariable(variable_name, idx)
+        # Check if the variable is a region - only for operations
+        if hasattr(self.op_def, 'regions'):
+            for idx, (region_name, region_def) in enumerate(self.op_def.regions):
+                if variable_name != region_name:
+                    continue
+                self.seen_regions[idx] = True
+                match region_def:
+                    case OptRegionDef() | OptSingleBlockRegionDef():
+                        return OptionalRegionVariable(variable_name, idx)
+                    case VarRegionDef() | VarSingleBlockRegionDef():
+                        return VariadicRegionVariable(variable_name, idx)
+                    case _:
+                        return RegionVariable(variable_name, idx)
 
-        # Check if the variable is a successor
-        for idx, (successor_name, successor_def) in enumerate(self.op_def.successors):
-            if variable_name != successor_name:
-                continue
-            self.seen_successors[idx] = True
-            match successor_def:
-                case OptSuccessorDef():
-                    return OptionalSuccessorVariable(variable_name, idx)
-                case VarSuccessorDef():
-                    return VariadicSuccessorVariable(variable_name, idx)
-                case _:
-                    return SuccessorVariable(variable_name, idx)
+        # Check if the variable is a successor - only for operations
+        if hasattr(self.op_def, 'successors'):
+            for idx, (successor_name, successor_def) in enumerate(self.op_def.successors):
+                if variable_name != successor_name:
+                    continue
+                self.seen_successors[idx] = True
+                match successor_def:
+                    case OptSuccessorDef():
+                        return OptionalSuccessorVariable(variable_name, idx)
+                    case VarSuccessorDef():
+                        return VariadicSuccessorVariable(variable_name, idx)
+                    case _:
+                        return SuccessorVariable(variable_name, idx)
 
-        attr_or_prop_by_name = {
-            attr_name: attr_or_prop
-            for attr_name, attr_or_prop in self.op_def.accessor_names.values()
-        }
+        # Check if the variable is an attribute/property - only for operations
+        if hasattr(self.op_def, 'accessor_names'):
+            attr_or_prop_by_name = {
+                attr_name: attr_or_prop
+                for attr_name, attr_or_prop in self.op_def.accessor_names.values()
+            }
 
-        # Check if the variable is an attribute
-        if variable_name in attr_or_prop_by_name:
-            attr_name = variable_name
-            attr_or_prop = attr_or_prop_by_name[attr_name]
-            is_property = attr_or_prop == "property"
-            if is_property:
-                if attr_name in self.seen_properties:
-                    self.raise_error(f"property '{variable_name}' is already bound")
-                self.seen_properties.add(attr_name)
-            else:
-                if attr_name in self.seen_attributes:
-                    self.raise_error(f"attribute '{variable_name}' is already bound")
-                self.seen_attributes.add(attr_name)
+            # Check if the variable is an attribute
+            if variable_name in attr_or_prop_by_name:
+                attr_name = variable_name
+                attr_or_prop = attr_or_prop_by_name[attr_name]
+                is_property = attr_or_prop == "property"
+                if is_property:
+                    if attr_name in self.seen_properties:
+                        self.raise_error(f"property '{variable_name}' is already bound")
+                    self.seen_properties.add(attr_name)
+                else:
+                    if attr_name in self.seen_attributes:
+                        self.raise_error(f"attribute '{variable_name}' is already bound")
+                    self.seen_attributes.add(attr_name)
 
-            attr_def = (
-                self.op_def.properties.get(attr_name)
-                if is_property
-                else self.op_def.attributes.get(attr_name)
-            )
-            if isinstance(attr_def, AttrOrPropDef):
-                bases = attr_def.constr.get_bases()
-                unique_base = (
-                    bases.pop() if bases is not None and len(bases) == 1 else None
+                attr_def = (
+                    self.op_def.properties.get(attr_name)
+                    if is_property
+                    else self.op_def.attributes.get(attr_name)
                 )
-                if unique_base == UnitAttr:
-                    return OptionalUnitAttrVariable(
-                        variable_name, is_property, None, None
+                if isinstance(attr_def, AttrOrPropDef):
+                    bases = attr_def.constr.get_bases()
+                    unique_base = (
+                        bases.pop() if bases is not None and len(bases) == 1 else None
+                    )
+                    if unique_base == UnitAttr:
+                        return OptionalUnitAttrVariable(
+                            variable_name, is_property, None, None
+                        )
+
+                    # Always qualify builtin attributes
+                    # This is technically an approximation, but appears to be good enough
+                    # for xDSL right now.
+                    unique_type = None
+                    if unique_base is not None and issubclass(unique_base, TypedAttribute):
+                        constr = attr_def.constr
+                        # TODO: generalize.
+                        # https://github.com/xdslproject/xdsl/issues/2499
+                        if isinstance(constr, ParamAttrConstraint):
+                            type_constraint = constr.param_constrs[
+                                unique_base.get_type_index()
+                            ]
+                            if type_constraint.can_infer(set()):
+                                unique_type = type_constraint.infer(ConstraintContext())
+                    if (
+                        unique_base is not None
+                        and unique_base in Builtin.attributes
+                        and unique_type is None
+                    ):
+                        unique_base = None
+
+                    # Ensure qualified attributes stay qualified
+                    if qualified:
+                        unique_base = None
+
+                    # Chill pyright with TypedAttribute without parameter
+                    unique_base = cast(type[Attribute] | None, unique_base)
+
+                    if attr_def.default_value is not None:
+                        return DefaultValuedAttributeVariable(
+                            variable_name,
+                            is_property,
+                            unique_base,
+                            unique_type,
+                            attr_def.default_value,
+                        )
+
+                    variable_type = (
+                        OptionalAttributeVariable
+                        if isinstance(attr_def, OptionalDef)
+                        else AttributeVariable
+                    )
+                    return variable_type(
+                        variable_name, is_property, unique_base, unique_type
                     )
 
-                # Always qualify builtin attributes
-                # This is technically an approximation, but appears to be good enough
-                # for xDSL right now.
-                unique_type = None
-                if unique_base is not None and issubclass(unique_base, TypedAttribute):
-                    constr = attr_def.constr
-                    # TODO: generalize.
-                    # https://github.com/xdslproject/xdsl/issues/2499
-                    if isinstance(constr, ParamAttrConstraint):
-                        type_constraint = constr.param_constrs[
-                            unique_base.get_type_index()
-                        ]
-                        if type_constraint.can_infer(set()):
-                            unique_type = type_constraint.infer(ConstraintContext())
-                if (
-                    unique_base is not None
-                    and unique_base in Builtin.attributes
-                    and unique_type is None
-                ):
-                    unique_base = None
-
-                # Ensure qualified attributes stay qualified
-                if qualified:
-                    unique_base = None
-
-                # Chill pyright with TypedAttribute without parameter
-                unique_base = cast(type[Attribute] | None, unique_base)
-
-                if attr_def.default_value is not None:
-                    return DefaultValuedAttributeVariable(
-                        variable_name,
-                        is_property,
-                        unique_base,
-                        unique_type,
-                        attr_def.default_value,
-                    )
-
-                variable_type = (
-                    OptionalAttributeVariable
-                    if isinstance(attr_def, OptionalDef)
-                    else AttributeVariable
-                )
-                return variable_type(
-                    variable_name, is_property, unique_base, unique_type
-                )
-
+        # If we get here for operations, the variable wasn't found
         self.raise_error(
             "expected variable to refer to an operand, attribute, region, or successor",
             at_position=start_pos,
