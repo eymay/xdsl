@@ -218,77 +218,49 @@ class ParamAttrDef:
 _PAttrTT = TypeVar("_PAttrTT", bound=type[ParametrizedAttribute])
 
 
-def get_accessors_from_param_attr_def(attr_def: ParamAttrDef, assembly_format: str | None = None) -> dict[str, Any]:
+def get_accessors_from_param_attr_def(attr_def, assembly_format: str | None = None) -> dict[str, Any]:
     @classmethod
-    def get_irdl_definition(cls: type[ParametrizedAttribute]):
+    def get_irdl_definition(cls):
         return attr_def
 
     accessors = {"get_irdl_definition": get_irdl_definition}
     
     if assembly_format is not None:
-        from xdsl.irdl.declarative_assembly_format import (
-            FormatProgram, 
-            PunctuationDirective,
-            KeywordDirective, 
-            AttributeVariable,
-            AttrDictDirective
-        ) 
-        # Create format program - this should work now with our FormatParser fix
-        format_program = FormatProgram.from_str(assembly_format, attr_def)
+        from xdsl.irdl.declarative_assembly_format import FormatProgram
         
-        @classmethod 
-        def parse_parameters_with_format(cls, parser) -> list[Attribute]:
-            """Parse parameters using assembly_format."""
-            # Create a minimal parsing state
-            class AttributeParsingState:
-                def __init__(self):
-                    self.parameters = {}
-            
-            state = AttributeParsingState()
-            
-            # Simple manual parsing for now - we'll implement proper directive parsing later
-            # For your specific case: "`<` `scaling_factor` `=` $scaling_factor `>` attr-dict"
-            
-            # This is a temporary implementation for your immediate use case
-            for stmt in format_program.stmts:
-                if isinstance(stmt, PunctuationDirective):
-                    parser.parse_punctuation(stmt.punctuation)
-                elif isinstance(stmt, KeywordDirective):
-                    parser.parse_keyword(stmt.keyword)
-                elif isinstance(stmt, AttributeVariable):
-                    param_name = stmt.name
-                    value = parser.parse_attribute()
-                    state.parameters[param_name] = value
-                elif isinstance(stmt, AttrDictDirective):
-                    parser.parse_optional_attr_dict()
+        try:
+            assembly_program = FormatProgram.from_str(assembly_format, attr_def)
+        except Exception as e:
+            raise PyRDLAttrDefinitionError(
+                f"Error parsing assembly format for {attr_def.name}: {e}"
+            ) from e
 
-            
-            # Extract parameters in correct order
-            parameters = []
-            for param_name, _ in attr_def.parameters:
-                if param_name in state.parameters:
-                    parameters.append(state.parameters[param_name])
-                else:
-                    # Try to parse remaining parameters generically
-                    parameters.append(parser.parse_attribute())
-            
-            return parameters
+        @classmethod
+        def parse_parameters_with_format(cls, parser) -> list[Attribute]:
+            """Parse parameters using assembly_format with proper error handling."""
+            try:
+                result = assembly_program.parse_attribute_parameters(parser, cls, attr_def)
+                if len(result) != len(attr_def.parameters):
+                    parser.raise_error(
+                        f"Assembly format for {cls.__name__} parsed {len(result)} parameters, "
+                        f"but expected {len(attr_def.parameters)}"
+                    )
+                return result
+            except Exception as e:
+                parser.raise_error(f"Error parsing {cls.__name__} with assembly format: {e}")
         
         def print_parameters_with_format(self, printer) -> None:
             """Print parameters using assembly_format."""
-            param_values = {name: self.parameters[i] for i, (name, _) in enumerate(attr_def.parameters)}
-            
-            # Simple manual printing for now
-            for stmt in format_program.stmts:
-                if hasattr(stmt, 'punctuation'):
-                    printer.print_string(stmt.punctuation)
-                elif hasattr(stmt, 'keyword'):
-                    printer.print_string(stmt.keyword)
-                elif hasattr(stmt, 'name'):
-                    param_name = stmt.name
-                    if param_name in param_values:
-                        printer.print_attribute(param_values[param_name])
-                # Skip attr-dict for now
+            try:
+                assembly_program.print_attribute(printer, self)
+            except Exception as e:
+                # Fallback to default printing
+                printer.print("<")
+                for i, param in enumerate(self.parameters):
+                    if i > 0:
+                        printer.print(", ")
+                    printer.print_attribute(param)
+                printer.print(">")
         
         accessors["parse_parameters"] = parse_parameters_with_format
         accessors["print_parameters"] = print_parameters_with_format

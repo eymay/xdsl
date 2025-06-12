@@ -46,8 +46,18 @@ class AttributeParsingState:
     parameters: dict[str, Attribute]
     """Parameters that have been parsed."""
     
-    def __init__(self, attr_def: 'ParamAttrDef'):
+    def __init__(self, attr_def):
         self.parameters = {}
+
+@dataclass
+class AttributePrintingState:
+    """
+    State carried during the printing of an attribute using the declarative assembly
+    format.
+    """
+
+    last_was_punctuation: bool = field(default=False)
+    should_emit_space: bool = field(default=True)
 
 
 @dataclass
@@ -197,27 +207,55 @@ class FormatProgram:
         
         return attr_class.new(parameters)
 
-    def print_attribute(
-        self, printer: Printer, attr: 'ParametrizedAttribute'
-    ) -> None:
+    def parse_attribute_parameters(
+            self, parser: Parser, attr_class, attr_def
+        ) -> list[Attribute]:
+            """
+            Parse attribute parameters using the declarative assembly format.
+            
+            This is the fixed version that properly handles assembly format parsing.
+            """
+            # Create attribute parsing state
+            state = AttributeParsingState(attr_def)
+            
+            try:
+                # Parse elements one by one using the format directives
+                for stmt in self.stmts:
+                    if hasattr(stmt, 'parse_attribute'):
+                        stmt.parse_attribute(parser, state, attr_def)
+                    else:
+                        # Handle directives that don't support parse_attribute yet
+                        if isinstance(stmt, PunctuationDirective):
+                            parser.parse_punctuation(stmt.punctuation)
+                        elif isinstance(stmt, KeywordDirective):
+                            parser.parse_keyword(stmt.keyword)
+                        elif isinstance(stmt, AttrDictDirective):
+                            # For attr-dict in attributes, just parse optional dict
+                            parser.parse_optional_attr_dict()
+                        else:
+                            parser.raise_error(f"Directive {type(stmt)} not supported for attributes")
+            except Exception as e:
+                parser.raise_error(f"Error parsing attribute assembly format: {e}")
+            
+            # Extract parameters in the correct order
+            parameters = []
+            for param_name, _ in attr_def.parameters:
+                if param_name not in state.parameters:
+                    parser.raise_error(f"Parameter '{param_name}' was not parsed by assembly format")
+                parameters.append(state.parameters[param_name])
+            
+            return parameters
+
+    def print_attribute(self, printer: Printer, attr) -> None:
         """
         Print an attribute using this format.
-        This is the attribute equivalent of the print method for operations.
         """
-        from xdsl.irdl.declarative_assembly_format import AttributePrintingState
-        
-        # Create printing state  
         state = AttributePrintingState()
-        
-        # Get attribute definition
         attr_def = attr.get_irdl_definition()
         
         # Print elements one by one
         for stmt in self.stmts:
             stmt.print_attribute(printer, state, attr, attr_def)
-
-
-
 
     def resolve_constraint_variables(self, state: ParsingState, op_def: OpDef):
         """
@@ -360,14 +398,15 @@ class FormatDirective(Directive, ABC):
         """
         ...
 
-    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
-        parser.parse_punctuation(self.punctuation)
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def) -> None:
+        """Parse the directive for attributes. Default implementation raises error."""
+        raise ValueError(f"Directive {type(self)} does not support attribute parsing")
 
 
-    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
-        printer.print_string(self.punctuation)
-        state.last_was_punctuation = True
-        state.should_emit_space = False
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr, attr_def) -> None:
+        """Print the directive for attributes. Default implementation raises error."""
+        raise ValueError(f"Directive {type(self)} does not support attribute printing")
+
 
     @abstractmethod
     def print(
@@ -560,13 +599,12 @@ class AttrDictDirective(FormatDirective):
             state.last_was_punctuation = False
             state.should_emit_space = True
 
-    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def) -> None:
         # Parse attribute dictionary (typically empty for attribute parameters)
         attrs = parser.parse_optional_attr_dict()
-        # For attributes, we don't usually store the attr-dict content
 
-    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
-        # For attributes, attr-dict is typically empty, so we don't print anything
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr, attr_def) -> None:
+        # For attributes, attr-dict is typically empty
         pass
 
     def is_optional_like(self) -> bool:
@@ -1179,8 +1217,18 @@ class AttributeVariable(FormatDirective):
 
     def parse(self, parser: Parser, state: ParsingState) -> bool:
         unique_base = self.unique_base
+
         if unique_base is None:
-            attr = parser.parse_attribute()
+            try:
+                attr = parser.parse_attribute()
+            except Exception as e:
+                # If parsing fails and we're looking at '<', provide helpful error
+                if parser._current_token.kind == MLIRTokenKind.LESS:
+                    parser.raise_error(
+                        f"Inline attribute definition found, but expected explicit attribute reference. "
+                        f"Use '#dialect.attr<...>' syntax or define the attribute separately."
+                    )
+                raise e
         elif self.unique_type is not None:
             assert issubclass(unique_base, TypedAttribute)
             attr = unique_base.parse_with_type(parser, self.unique_type)
@@ -1224,24 +1272,37 @@ class AttributeVariable(FormatDirective):
         raise ValueError("Attributes must be Data or ParameterizedAttribute!")
 
     def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
-        param_name = self.name
-        
-        # Find the parameter constraint
-        param_constraint = None
-        for name, constraint in attr_def.parameters:
-            if name == param_name:
-                param_constraint = constraint
-                break
-        
-        if param_constraint is None:
-            parser.raise_error(f"Unknown parameter '{param_name}'")
-        
-        if param_name in state.parameters:
-            parser.raise_error(f"Parameter '{param_name}' already parsed")
-        
-        # Parse the parameter value
-        value = parser.parse_attribute()
-        state.parameters[param_name] = value
+            param_name = self.name
+            
+            # Find the parameter constraint
+            param_constraint = None
+            for name, constraint in attr_def.parameters:
+                if name == param_name:
+                    param_constraint = constraint
+                    break
+            
+            if param_constraint is None:
+                parser.raise_error(f"Unknown parameter '{param_name}'")
+            
+            if param_name in state.parameters:
+                parser.raise_error(f"Parameter '{param_name}' already parsed")
+            
+            # Parse the parameter value based on constraint
+            if hasattr(param_constraint, 'get_bases'):
+                bases = param_constraint.get_bases()
+                if bases and len(bases) == 1:
+                    unique_base = list(bases)[0]
+                    if issubclass(unique_base, ParametrizedAttribute):
+                        value = unique_base.new(unique_base.parse_parameters(parser))
+                    else:
+                        value = parser.parse_attribute()
+                else:
+                    value = parser.parse_attribute()
+            else:
+                value = parser.parse_attribute()
+            
+            state.parameters[param_name] = value
+
 
     def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
         param_name = self.name
@@ -1385,6 +1446,26 @@ class PunctuationDirective(FormatDirective):
     def parse(self, parser: Parser, state: ParsingState) -> bool:
         return parser.parse_optional_punctuation(self.punctuation) is not None
 
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def) -> None:
+        parser.parse_punctuation(self.punctuation)
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr, attr_def) -> None:
+        emit_space = False
+        if state.should_emit_space:
+            if state.last_was_punctuation:
+                if self.punctuation not in (">", ")", "}", "]", ","):
+                    emit_space = True
+            elif self.punctuation not in ("<", ">", "(", ")", "{", "}", "[", "]", ","):
+                emit_space = True
+
+            if emit_space:
+                printer.print(" ")
+
+        printer.print(self.punctuation)
+        state.should_emit_space = self.punctuation not in ("<", "(", "{", "[")
+        state.last_was_punctuation = True
+
+
     def print(self, printer: Printer, state: PrintingState, op: IRDLOperation) -> None:
         emit_space = False
         if state.should_emit_space:
@@ -1431,15 +1512,15 @@ class KeywordDirective(FormatDirective):
     def is_optional_like(self) -> bool:
         return True
 
-    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def: 'ParamAttrDef') -> None:
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def) -> None:
         parser.parse_keyword(self.keyword)
 
-    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr: 'ParametrizedAttribute', attr_def: 'ParamAttrDef') -> None:
-        if state.should_emit_space and not state.last_was_punctuation:
-            printer.print_string(" ")
-        printer.print_string(self.keyword)
-        state.last_was_punctuation = False
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr, attr_def) -> None:
+        if state.should_emit_space:
+            printer.print(" ")
+        printer.print(self.keyword)
         state.should_emit_space = True
+        state.last_was_punctuation = False
 
 
 @dataclass(frozen=True)
@@ -1475,25 +1556,168 @@ class OptionalGroupDirective(FormatDirective):
         for element in self.then_elements:
             element.set_empty(state)
 
-@dataclass(frozen=True)  
+@dataclass(frozen=True)
 class AttributeParameterVariable(FormatDirective):
-    """New directive for $parameter_name in attributes."""
-    
+    """
+    A parameter variable for attributes, with the following format:
+      parameter-directive ::= dollar-ident
+    """
+
     name: str
-    index: int
-    
-    def parse(self, parser: Parser, state: ParsingState) -> bool:
-        param_value = parser.parse_attribute()
-        state.attributes[self.name] = param_value
-        return True
-    
-    def print(self, printer: Printer, state: PrintingState, op) -> None:
-        # When used for attributes, 'op' is actually the attribute
-        attr = op
-        param_value = attr.parameters[self.index]
+    """The parameter name."""
+    unique_base: type[Attribute] | None
+    """The known base class of the Attribute parameter, if any."""
+    unique_type: Attribute | None
+    """The known type of the Attribute parameter, if any."""
+
+    def parse_attribute(self, parser: Parser, state: AttributeParsingState, attr_def) -> None:
+        """Parse an attribute parameter - this is where the magic happens."""
+        if self.name in state.parameters:
+            parser.raise_error(f"Parameter '{self.name}' already parsed")
+        
+        # The key insight: We need to parse the attribute based on the context
+        if self.unique_base is not None:
+            if issubclass(self.unique_base, ParametrizedAttribute):
+                # For ParametrizedAttribute, check if we're parsing inline syntax
+                if parser._current_token.kind == MLIRTokenKind.LESS:
+                    # This is inline syntax - parse it using the attribute's own parser
+                    # But we need to be careful about the syntax
+                    value = self._parse_inline_attribute_smart(parser, self.unique_base)
+                else:
+                    # This is explicit syntax like #dialect.attr<...>
+                    value = parser.parse_attribute()
+            elif issubclass(self.unique_base, Data):
+                # For Data attributes
+                if parser._current_token.kind == MLIRTokenKind.LESS:
+                    value = self.unique_base.new(self.unique_base.parse_parameter(parser))
+                else:
+                    value = parser.parse_attribute()
+            else:
+                # Generic attribute
+                value = parser.parse_attribute()
+        else:
+            # No type constraint - parse generically
+            value = parser.parse_attribute()
+        
+        # Validate the type if we have a constraint
+        if self.unique_base is not None and not isinstance(value, self.unique_base):
+            parser.raise_error(
+                f"Expected {self.unique_base.__name__} for parameter '{self.name}', "
+                f"got {type(value).__name__}"
+            )
+        
+        state.parameters[self.name] = value
+
+    def _parse_inline_attribute_smart(self, parser: Parser, attr_class) -> Attribute:
+        """
+        Smart parsing for inline attributes that handles assembly format correctly.
+        """
+        # Try to use the attribute's assembly format if it has one
+        if hasattr(attr_class, 'parse_parameters_with_format'):
+            try:
+                # Use assembly format parsing
+                parameters = attr_class.parse_parameters_with_format(parser)
+                return attr_class.new(parameters)
+            except Exception:
+                # If assembly format fails, fall back to manual parsing
+                pass
+        
+        # Manual parsing for attributes without assembly format or when it fails
+        return self._parse_inline_manual(parser, attr_class)
+
+    def _parse_inline_manual(self, parser: Parser, attr_class) -> Attribute:
+        """Manual parsing for inline attribute syntax."""
+        attr_def = attr_class.get_irdl_definition()
+        
+        parser.parse_punctuation("<")
+        
+        if parser.parse_optional_punctuation(">"):
+            # Empty attribute
+            if len(attr_def.parameters) == 0:
+                return attr_class.new([])
+            else:
+                parser.raise_error(f"Expected parameters for {attr_class.__name__}")
+        
+        parameters = []
+        
+        # Handle single parameter specially (common case)
+        if len(attr_def.parameters) == 1:
+            param_name, _ = attr_def.parameters[0]
+            
+            # Try to parse "key = value" syntax first
+            checkpoint = parser.pos
+            try:
+                if (parser._current_token.kind == MLIRTokenKind.BARE_IDENT and 
+                    parser._current_token.text == param_name):
+                    parser._consume_token()  # consume key
+                    parser.parse_punctuation("=")
+                    value = parser.parse_attribute()
+                    parameters.append(value)
+                else:
+                    # Reset and parse as positional
+                    parser._resume_from(checkpoint)
+                    value = parser.parse_attribute()
+                    parameters.append(value)
+            except:
+                # If key=value parsing fails, try positional
+                parser._resume_from(checkpoint)
+                value = parser.parse_attribute()
+                parameters.append(value)
+        else:
+            # Multiple parameters - require key=value syntax
+            parsed_params = {}
+            
+            while True:
+                key = parser.parse_identifier("Expected parameter name")
+                parser.parse_punctuation("=", "Expected '=' after parameter name")
+                value = parser.parse_attribute()
+                parsed_params[key] = value
+                
+                if parser.parse_optional_punctuation(">"):
+                    break
+                elif parser.parse_optional_punctuation(","):
+                    continue
+                else:
+                    parser.raise_error("Expected ',' or '>' in attribute parameters")
+            
+            # Convert to ordered parameter list
+            for param_name, _ in attr_def.parameters:
+                if param_name not in parsed_params:
+                    parser.raise_error(f"Missing parameter '{param_name}' in inline attribute")
+                parameters.append(parsed_params[param_name])
+        
+        parser.parse_punctuation(">")
+        return attr_class.new(parameters)
+
+    def print_attribute(self, printer: Printer, state: AttributePrintingState, attr, attr_def) -> None:
+        """Print an attribute parameter."""
+        # Find parameter index
+        param_index = None
+        for i, (name, _) in enumerate(attr_def.parameters):
+            if name == self.name:
+                param_index = i
+                break
+        
+        if param_index is None:
+            raise ValueError(f"Unknown parameter '{self.name}'")
+        
+        param_value = attr.parameters[param_index]
+        
         if state.should_emit_space and not state.last_was_punctuation:
             printer.print(" ")
-        printer.print_attribute(param_value)
+        
+        # Print based on unique_base
+        if self.unique_base is None:
+            printer.print_attribute(param_value)
+        elif issubclass(self.unique_base, ParametrizedAttribute):
+            # For ParametrizedAttribute, print inline parameters
+            param_value.print_parameters(printer)
+        elif issubclass(self.unique_base, Data):
+            param_value.print_parameter(printer)
+        else:
+            printer.print_attribute(param_value)
+        
         state.last_was_punctuation = False
         state.should_emit_space = True
+
 

@@ -161,24 +161,25 @@ class FormatParser(BaseParser):
 
 
     def parse_format(self) -> FormatProgram:
-        """
-        Parse a declarative format, with the following syntax:
-          format ::= directive*
-        Once the format is parsed, check that it is correct, i.e., that it is
-        unambiguous and refer to all elements exactly once.
-        """
+        """Parse a declarative format."""
         elements: list[FormatDirective] = []
         while self._current_token.kind != MLIRTokenKind.EOF:
             elements.append(self.parse_format_directive())
 
-        attr_dict_idx = self.verify_attr_dict(elements)
-        variables = self.get_constraint_variables()
-        self.verify_directives(elements)
-        self.verify_properties(elements, attr_dict_idx)
-        self.verify_operands(variables)
-        self.verify_results(variables)
-        self.verify_regions()
-        self.verify_successors()
+        if hasattr(self.op_def, 'parameters'):
+            # Attribute verification
+            self.verify_parameters()
+        else:
+            # Operation verification (existing logic)
+            attr_dict_idx = self.verify_attr_dict(elements)
+            variables = self.get_constraint_variables()
+            self.verify_directives(elements)
+            self.verify_properties(elements, attr_dict_idx)
+            self.verify_operands(variables)
+            self.verify_results(variables)
+            self.verify_regions()
+            self.verify_successors()
+        
         return FormatProgram(tuple(elements))
 
     def verify_directives(self, elements: list[FormatDirective]):
@@ -318,6 +319,19 @@ class FormatParser(BaseParser):
                     )
                 return i
         self.raise_error("'attr-dict' directive not found")
+
+
+    def verify_parameters(self):
+        """Check that all attribute parameters are present."""
+        if not hasattr(self.op_def, 'parameters'):
+            return
+        
+        for param_name, _ in self.op_def.parameters:
+            if param_name not in self.seen_parameters:
+                self.raise_error(
+                    f"parameter '{param_name}' not found, consider adding a '${param_name}' "
+                    "directive to the assembly format"
+                )
 
     def verify_properties(self, elements: list[FormatDirective], attr_dict_idx: int):
         """
@@ -489,17 +503,25 @@ class FormatParser(BaseParser):
         if hasattr(self.op_def, 'parameters'):
             for param_name, param_constraint in self.op_def.parameters:
                 if variable_name == param_name:
-                    if param_name in self.seen_attributes:
+                    if param_name in self.seen_parameters:
                         self.raise_error(f"Parameter '{param_name}' used multiple times")
-                    self.seen_attributes.add(param_name)
-                    return AttributeVariable(param_name, False, None, None)
+                    self.seen_parameters.add(param_name)
+                    
+                    # CRITICAL: Extract unique_base from constraint
+                    unique_base = None
+                    if hasattr(param_constraint, 'get_bases'):
+                        bases = param_constraint.get_bases()
+                        if bases and len(bases) == 1:
+                            unique_base = list(bases)[0]
+                    
+                    from xdsl.irdl.constraints import BaseAttr
+                    if isinstance(param_constraint, BaseAttr):
+                        unique_base = param_constraint.attr
+                    
+                    return AttributeParameterVariable(param_name, unique_base, None)
             
-            # If we get here, the parameter wasn't found
-            self.raise_error(
-                f"expected variable to refer to a parameter, got '{variable_name}'",
-                at_position=start_pos,
-                end_position=end_pos,
-            )
+            self.raise_error(f"Unknown parameter '{variable_name}'")
+
 
         # Handle operations (OpDef) - original logic
         
